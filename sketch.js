@@ -1,4 +1,3 @@
-
 let player;
 let terrain = [];
 let bullets = [];
@@ -9,6 +8,7 @@ let updrafts = [];
 let enemyBullets = [];
 let buttons = [];
 let gates = [];
+let thrustParticles = []; // Array to hold thrust particles
 
 
 let cameraX = 0;
@@ -95,6 +95,7 @@ class Player {
         this.onGround = false;
         this.lastHorizontalFacing = 1; // 1 for right, -1 for left
         this.shieldTimer = 0;
+        this.thrustDuration = 0; // Track how long we've been thrusting
     }
 
     isShieldActive() {
@@ -115,6 +116,31 @@ class Player {
         thrustVector.mult(THRUST_FORCE);
         this.applyForce(thrustVector);
         this.isThrusting = true;
+        
+        // Create thrust particles
+        this.createThrustParticles();
+    }
+    
+    createThrustParticles() {
+        if (fuel <= 0) return;
+        
+        let s = this.spriteSize;
+        // Calculate intensity based on thrust duration (builds up over time)
+        let intensity = map(this.thrustDuration, 0, 30, 0.3, 1.5);
+        intensity = constrain(intensity, 0.3, 1.5);
+        
+        // Create particles from both jetpack nozzles
+        for (let i = -1; i <= 1; i += 2) {
+            // Calculate world position of each nozzle
+            let nozzleX = this.pos.x + cos(this.angle + PI/2) * (i * s * 0.15) + cos(this.angle) * (s * 0.55);
+            let nozzleY = this.pos.y + sin(this.angle + PI/2) * (i * s * 0.15) + sin(this.angle) * (s * 0.55);
+            
+            // Create more particles when thrusting longer
+            let particleCount = Math.floor(random(1, 4) * intensity);
+            for (let j = 0; j < particleCount; j++) {
+                thrustParticles.push(new ThrustParticle(nozzleX, nozzleY, this.angle, this.vel, intensity));
+            }
+        }
     }
 
     rotate(delta) {
@@ -143,6 +169,14 @@ class Player {
         this.pos.add(this.vel);
         this.acc.mult(0);
         this.vel.mult(0.99);
+        
+        // Update thrust duration
+        if (this.isThrusting) {
+            this.thrustDuration++;
+        } else {
+            this.thrustDuration = 0;
+        }
+        
         this.isThrusting = false;
         if (this.shieldTimer > 0) {
             this.shieldTimer--;
@@ -198,14 +232,15 @@ class Player {
         ellipse(0, -s*0.35, s*0.4, s*0.4);
 
         if (this.isThrusting && fuel > 0) {
+            // Subtle flame triangles as base layer
             let flameHue = frameCount % 10 < 5 ? 0 : 40;
             for (let i = -1; i <= 1; i += 2) {
                 push();
                 translate(i * s * 0.15, s * 0.55);
-                fill(flameHue, 100, 100);
-                triangle(-s * 0.08, 0, s * 0.08, 0, 0, s * 0.4 + random(-s*0.05, s*0.05));
+                fill(flameHue, 100, 80, 120); // More transparent
+                triangle(-s * 0.06, 0, s * 0.06, 0, 0, s * 0.25 + random(-s*0.03, s*0.03));
                 fill(flameHue + 20, 100, 100, 80);
-                triangle(-s * 0.05, 0, s * 0.05, 0, 0, s * 0.3 + random(-s*0.03, s*0.03));
+                triangle(-s * 0.04, 0, s * 0.04, 0, 0, s * 0.15 + random(-s*0.02, s*0.02));
                 pop();
             }
         }
@@ -653,13 +688,85 @@ class GateBlock {
 }
 
 
+// --- ThrustParticle Class ---
+class ThrustParticle {
+    constructor(x, y, angle, playerVel, intensity = 1) {
+        this.pos = createVector(x, y);
+        
+        // Add some spread to the thrust direction (opposite to thrust angle)
+        let particleAngle = angle + PI + random(-0.4, 0.4); // Opposite direction with spread
+        this.vel = p5.Vector.fromAngle(particleAngle);
+        this.vel.mult(random(2, 8) * intensity); // Random initial speed affected by intensity
+        
+        // Inherit some player velocity for more realistic motion
+        this.vel.add(p5.Vector.mult(playerVel, 0.4));
+        
+        this.life = random(15, 45) * intensity; // Lifespan in frames, affected by intensity
+        this.maxLife = this.life;
+        this.size = random(1.5, 4) * intensity;
+        
+        // More varied colors - blue core to orange/red edges
+        this.hue = random(5, 60); // Orange to yellow range with some red
+        this.saturation = random(70, 100);
+        this.brightness = random(70, 100);
+        
+        // Add some physics properties
+        this.drag = random(0.96, 0.99);
+        this.gravity = random(0.02, 0.08);
+    }
+    
+    update() {
+        this.pos.add(this.vel);
+        this.vel.mult(this.drag); // Apply drag
+        this.vel.add(createVector(random(-0.1, 0.1), this.gravity)); // Slight gravity and turbulence
+        this.life--;
+        
+        // Dynamic color shift as particle ages
+        let ageRatio = 1 - (this.life / this.maxLife);
+        this.hue = lerp(this.hue, 0, ageRatio * 0.1); // Shift toward red as it ages
+        this.brightness = lerp(this.brightness, 30, ageRatio * 0.3); // Dim as it ages
+        
+        // Fade out over time
+        this.alpha = map(this.life, 0, this.maxLife, 0, 255);
+        this.size *= 0.985; // Shrink over time
+    }
+    
+    draw() {
+        if (this.size < 0.5) return; // Don't draw tiny particles
+        
+        push();
+        let alpha = map(this.life, 0, this.maxLife, 0, 200);
+        
+        // Outer glow
+        fill(this.hue, this.saturation * 0.6, this.brightness * 0.8, alpha * 0.3);
+        noStroke();
+        ellipse(this.pos.x, this.pos.y, this.size * 2);
+        
+        // Main particle
+        fill(this.hue, this.saturation, this.brightness, alpha);
+        ellipse(this.pos.x, this.pos.y, this.size);
+        
+        // Hot inner core
+        if (this.life > this.maxLife * 0.5) {
+            fill(this.hue + 40, this.saturation - 30, 100, alpha * 0.8);
+            ellipse(this.pos.x, this.pos.y, this.size * 0.4);
+        }
+        pop();
+    }
+    
+    isDead() {
+        return this.life <= 0 || this.size < 0.5;
+    }
+}
+
+
 function loadLevel(levelIdx) {
     if (levelIdx >= levels.length) {
         gameWon = true; gameRunning = false; return;
     }
 
     terrain = []; bullets = []; enemies = []; pickups = []; exitPortal = null;
-    updrafts = []; enemyBullets = []; buttons = []; gates = [];
+    updrafts = []; enemyBullets = []; buttons = []; gates = []; thrustParticles = [];
 
     let levelData = levels[levelIdx];
     for (let r = 0; r < levelData.length; r++) {
@@ -799,6 +906,18 @@ function draw() {
         
         handlePlayerCollisions();
 
+        // Update thrust particles
+        for (let i = thrustParticles.length - 1; i >= 0; i--) {
+            thrustParticles[i].update();
+            if (thrustParticles[i].isDead()) {
+                thrustParticles.splice(i, 1);
+            }
+        }
+        
+        // Limit particle count for performance
+        if (thrustParticles.length > 150) {
+            thrustParticles.splice(0, thrustParticles.length - 150);
+        }
 
         for (let i = bullets.length - 1; i >= 0; i--) {
             bullets[i].update();
@@ -897,6 +1016,10 @@ function draw() {
     if(exitPortal) exitPortal.draw();
     for (let pickup of pickups) pickup.draw();
     for (let button of buttons) button.draw();
+    
+    // Draw thrust particles before other game objects for proper layering
+    for (let particle of thrustParticles) particle.draw();
+    
     for (let bullet of bullets) bullet.draw();
     for (let eb of enemyBullets) eb.draw();
     for (let enemy of enemies) enemy.draw();
