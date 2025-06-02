@@ -8,7 +8,8 @@ let updrafts = [];
 let enemyBullets = [];
 let buttons = [];
 let gates = [];
-let thrustParticles = []; // Array to hold thrust particles
+let thrustParticles = []; // Array to hold active thrust particles
+let thrustParticlePool = []; // Object pool for reusing thrust particles
 
 
 let cameraX = 0;
@@ -124,10 +125,18 @@ class Player {
     createThrustParticles() {
         if (fuel <= 0) return;
         
+        // Adaptive particle count based on performance
+        let performanceMultiplier = 1;
+        if (frameRate() < 30) {
+            performanceMultiplier = 0.5; // Reduce particles if FPS is low
+        } else if (frameRate() > 50) {
+            performanceMultiplier = 1.2; // Increase particles if FPS is high
+        }
+        
         let s = this.spriteSize;
         // Calculate intensity based on thrust duration (builds up over time)
         let intensity = map(this.thrustDuration, 0, 30, 0.3, 1.5);
-        intensity = constrain(intensity, 0.3, 1.5);
+        intensity = constrain(intensity, 0.3, 1.5) * performanceMultiplier;
         
         // Create particles from both jetpack nozzles
         for (let i = -1; i <= 1; i += 2) {
@@ -138,7 +147,8 @@ class Player {
             // Create more particles when thrusting longer
             let particleCount = Math.floor(random(1, 4) * intensity);
             for (let j = 0; j < particleCount; j++) {
-                thrustParticles.push(new ThrustParticle(nozzleX, nozzleY, this.angle, this.vel, intensity));
+                // Use particle pool instead of creating new particles
+                particlePool.getParticle(nozzleX, nozzleY, this.angle, this.vel, intensity);
             }
         }
     }
@@ -691,73 +701,213 @@ class GateBlock {
 // --- ThrustParticle Class ---
 class ThrustParticle {
     constructor(x, y, angle, playerVel, intensity = 1) {
-        this.pos = createVector(x, y);
+        this.pos = createVector(0, 0);
+        this.vel = createVector(0, 0);
+        this.turbulence = createVector(0, 0); // Reusable vector for turbulence
+        this.reset(x, y, angle, playerVel, intensity);
+    }
+    
+    reset(x, y, angle, playerVel, intensity = 1) {
+        this.pos.set(x, y);
         
         // Add some spread to the thrust direction (opposite to thrust angle)
-        let particleAngle = angle + PI + random(-0.4, 0.4); // Opposite direction with spread
+        let particleAngle = angle + PI + random(-0.4, 0.4);
         this.vel = p5.Vector.fromAngle(particleAngle);
-        this.vel.mult(random(2, 8) * intensity); // Random initial speed affected by intensity
+        this.vel.mult(random(2, 8) * intensity);
         
         // Inherit some player velocity for more realistic motion
         this.vel.add(p5.Vector.mult(playerVel, 0.4));
         
-        this.life = random(15, 45) * intensity; // Lifespan in frames, affected by intensity
+        this.life = random(15, 45) * intensity;
         this.maxLife = this.life;
         this.size = random(1.5, 4) * intensity;
+        this.initialSize = this.size;
         
-        // More varied colors - blue core to orange/red edges
-        this.hue = random(5, 60); // Orange to yellow range with some red
+        // Pre-calculate values to avoid repeated calculations
+        this.sizeDecayRate = 0.985;
+        this.fadeRate = 255 / this.maxLife;
+        
+        // Colors
+        this.hue = random(5, 60);
+        this.initialHue = this.hue;
         this.saturation = random(70, 100);
         this.brightness = random(70, 100);
+        this.initialBrightness = this.brightness;
         
-        // Add some physics properties
+        // Physics properties
         this.drag = random(0.96, 0.99);
         this.gravity = random(0.02, 0.08);
+        
+        // Pre-calculate some color values
+        this.glowSaturation = this.saturation * 0.6;
+        this.glowBrightness = this.brightness * 0.8;
+        this.coreSaturation = max(0, this.saturation - 30);
+        
+        // Reset state
+        this.dead = false;
+        this.ageRatio = 0;
     }
     
     update() {
         this.pos.add(this.vel);
-        this.vel.mult(this.drag); // Apply drag
-        this.vel.add(createVector(random(-0.1, 0.1), this.gravity)); // Slight gravity and turbulence
+        this.vel.mult(this.drag);
+        
+        // Use reusable vector for turbulence to reduce garbage collection
+        this.turbulence.set(random(-0.1, 0.1), this.gravity);
+        this.vel.add(this.turbulence);
+        
         this.life--;
         
-        // Dynamic color shift as particle ages
-        let ageRatio = 1 - (this.life / this.maxLife);
-        this.hue = lerp(this.hue, 0, ageRatio * 0.1); // Shift toward red as it ages
-        this.brightness = lerp(this.brightness, 30, ageRatio * 0.3); // Dim as it ages
+        // Pre-calculate age ratio once per frame
+        this.ageRatio = 1 - (this.life / this.maxLife);
         
-        // Fade out over time
-        this.alpha = map(this.life, 0, this.maxLife, 0, 255);
-        this.size *= 0.985; // Shrink over time
+        // Optimized color shifts
+        this.hue = lerp(this.initialHue, 0, this.ageRatio * 0.1);
+        this.brightness = lerp(this.initialBrightness, 30, this.ageRatio * 0.3);
+        
+        // Optimized size calculation
+        this.size = this.initialSize * (this.life / this.maxLife) * this.sizeDecayRate;
+        
+        // Mark as dead when appropriate
+        if (this.life <= 0 || this.size < 0.5) {
+            this.dead = true;
+        }
     }
     
     draw() {
-        if (this.size < 0.5) return; // Don't draw tiny particles
+        if (this.dead || this.size < 0.5) return;
         
         push();
-        let alpha = map(this.life, 0, this.maxLife, 0, 200);
         
-        // Outer glow
-        fill(this.hue, this.saturation * 0.6, this.brightness * 0.8, alpha * 0.3);
+        // Pre-calculate alpha once
+        let alpha = this.life * this.fadeRate;
+        if (alpha > 200) alpha = 200; // Clamp to max
+        
         noStroke();
-        ellipse(this.pos.x, this.pos.y, this.size * 2);
+        
+        // Outer glow (only if particle is not too small)
+        if (this.size > 1) {
+            fill(this.hue, this.glowSaturation, this.glowBrightness, alpha * 0.3);
+            ellipse(this.pos.x, this.pos.y, this.size * 2);
+        }
         
         // Main particle
         fill(this.hue, this.saturation, this.brightness, alpha);
         ellipse(this.pos.x, this.pos.y, this.size);
         
-        // Hot inner core
-        if (this.life > this.maxLife * 0.5) {
-            fill(this.hue + 40, this.saturation - 30, 100, alpha * 0.8);
+        // Hot inner core (only for young particles to reduce draw calls)
+        if (this.life > this.maxLife * 0.5 && this.size > 1.5) {
+            fill(this.hue + 40, this.coreSaturation, 100, alpha * 0.8);
             ellipse(this.pos.x, this.pos.y, this.size * 0.4);
         }
+        
         pop();
     }
     
     isDead() {
-        return this.life <= 0 || this.size < 0.5;
+        return this.dead;
     }
 }
+
+
+// --- Particle Pool Manager ---
+class ParticlePool {
+    constructor(maxSize = 200) {
+        this.pool = [];
+        this.active = [];
+        this.maxPoolSize = maxSize;
+        this.maxActiveParticles = 150;
+        
+        // Pre-populate pool with some particles
+        for (let i = 0; i < 50; i++) {
+            this.pool.push(new ThrustParticle(0, 0, 0, createVector(0, 0), 1));
+        }
+        
+        // Batch processing arrays to avoid frequent array operations
+        this.particlesToRemove = [];
+    }
+    
+    getParticle(x, y, angle, playerVel, intensity) {
+        let particle;
+        
+        if (this.pool.length > 0) {
+            // Reuse a particle from the pool
+            particle = this.pool.pop();
+            particle.reset(x, y, angle, playerVel, intensity);
+        } else {
+            // Create new particle if pool is empty
+            particle = new ThrustParticle(x, y, angle, playerVel, intensity);
+        }
+        
+        this.active.push(particle);
+        return particle;
+    }
+    
+    updateParticles() {
+        // Clear the removal array
+        this.particlesToRemove.length = 0;
+        
+        // Update all active particles and mark dead ones for removal
+        for (let i = 0; i < this.active.length; i++) {
+            this.active[i].update();
+            
+            if (this.active[i].isDead()) {
+                this.particlesToRemove.push(i);
+            }
+        }
+        
+        // Remove dead particles in reverse order to maintain indices
+        for (let i = this.particlesToRemove.length - 1; i >= 0; i--) {
+            let deadParticle = this.active.splice(this.particlesToRemove[i], 1)[0];
+            if (this.pool.length < this.maxPoolSize) {
+                this.pool.push(deadParticle);
+            }
+        }
+        
+        // Limit active particles for performance - remove oldest first
+        if (this.active.length > this.maxActiveParticles) {
+            let excess = this.active.length - this.maxActiveParticles;
+            for (let i = 0; i < excess; i++) {
+                let particle = this.active.shift();
+                if (this.pool.length < this.maxPoolSize) {
+                    this.pool.push(particle);
+                }
+            }
+        }
+    }
+    
+    drawParticles() {
+        // Batch render particles with similar properties together for better performance
+        for (let particle of this.active) {
+            particle.draw();
+        }
+    }
+    
+    clear() {
+        // Return all active particles to pool
+        for (let particle of this.active) {
+            if (this.pool.length < this.maxPoolSize) {
+                this.pool.push(particle);
+            }
+        }
+        this.active.length = 0; // More efficient than creating new array
+    }
+    
+    getActiveCount() {
+        return this.active.length;
+    }
+    
+    getPoolCount() {
+        return this.pool.length;
+    }
+    
+    getTotalCount() {
+        return this.active.length + this.pool.length;
+    }
+}
+
+// Global particle pool instance
+let particlePool;
 
 
 function loadLevel(levelIdx) {
@@ -766,7 +916,12 @@ function loadLevel(levelIdx) {
     }
 
     terrain = []; bullets = []; enemies = []; pickups = []; exitPortal = null;
-    updrafts = []; enemyBullets = []; buttons = []; gates = []; thrustParticles = [];
+    updrafts = []; enemyBullets = []; buttons = []; gates = [];
+    
+    // Clear particle pool when loading new level
+    if (particlePool) {
+        particlePool.clear();
+    }
 
     let levelData = levels[levelIdx];
     for (let r = 0; r < levelData.length; r++) {
@@ -811,6 +966,10 @@ function loadLevel(levelIdx) {
 function setup() {
     createCanvas(windowWidth, windowHeight);
     colorMode(HSB, 360, 100, 100, 100);
+    
+    // Initialize particle pool
+    particlePool = new ParticlePool(200);
+    
     player = new Player(0,0);
     loadLevel(currentLevelIndex);
     gameRunning = true; gameWon = false;
@@ -906,18 +1065,8 @@ function draw() {
         
         handlePlayerCollisions();
 
-        // Update thrust particles
-        for (let i = thrustParticles.length - 1; i >= 0; i--) {
-            thrustParticles[i].update();
-            if (thrustParticles[i].isDead()) {
-                thrustParticles.splice(i, 1);
-            }
-        }
-        
-        // Limit particle count for performance
-        if (thrustParticles.length > 150) {
-            thrustParticles.splice(0, thrustParticles.length - 150);
-        }
+        // Update thrust particles using particle pool
+        particlePool.updateParticles();
 
         for (let i = bullets.length - 1; i >= 0; i--) {
             bullets[i].update();
@@ -1017,8 +1166,8 @@ function draw() {
     for (let pickup of pickups) pickup.draw();
     for (let button of buttons) button.draw();
     
-    // Draw thrust particles before other game objects for proper layering
-    for (let particle of thrustParticles) particle.draw();
+    // Draw thrust particles using particle pool
+    particlePool.drawParticles();
     
     for (let bullet of bullets) bullet.draw();
     for (let eb of enemyBullets) eb.draw();
@@ -1046,6 +1195,15 @@ function draw() {
     if(player.isShieldActive()){
         fill(180, 80, 100);
         text("SHIELD: " + floor(player.shieldTimer/60)+ "s", width -100, 60);
+    }
+    
+    // Debug info for particle pool (optional - can be removed in production)
+    if (particlePool) {
+        fill(0, 0, 100, 80);
+        textSize(10);
+        textAlign(LEFT);
+        text("Active: " + particlePool.getActiveCount() + " | Pool: " + particlePool.getPoolCount() + " | Total: " + particlePool.getTotalCount(), 10, height - 30);
+        text("FPS: " + Math.round(frameRate()), 10, height - 15);
     }
     textStyle(NORMAL);
 
